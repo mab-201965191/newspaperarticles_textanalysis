@@ -1,0 +1,445 @@
+---
+title: "keyword_search_algorithm_text"
+author: "Maria Antonia Bravo"
+date: '2022-05-31'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(caret)
+library(glmnet)
+library(DBI)
+library(RSQLite)
+library(quanteda)
+library(quanteda.textmodels)
+library(quanteda.textplots)
+library(quanteda.textstats)
+library(tidyverse)
+library(lightgbm)
+```
+
+# Computed Assisted Keyword Selection
+
+## The Keyword Algorithm (King et. al 2017 - copied here textually)
+### 1. Define a reference set R and search set S. 
+
+Loading General News Data from Lexis Nexis 
+```{r warning=FALSE}
+# Loading the Search_Set (General News, 2018-2020)
+
+# Load database and query
+db <- dbConnect(RSQLite::SQLite(), "news_data.sqlite")
+
+search <- dbGetQuery(db, "SELECT * FROM search_set")
+
+# Formatting date
+search$date_formatted <- as.Date(search$date_formatted, origin = lubridate::origin)
+
+# Removing exact duplicates
+search <- search %>%
+  distinct()
+
+search$id <- paste0("text", 1:nrow(search))
+```
+
+Loading Humanitarian News from Lexis Nexis
+```{r warning=FALSE}
+# Create dataframe with search set
+ref <- dbGetQuery(db, "SELECT * FROM reference_set")
+
+# Formatting date
+ref$date_formatted <- as.Date(ref$date_formatted, origin = lubridate::origin)
+
+# Removing exact duplicates
+ref <- ref %>% distinct()
+ref$id <- paste0("text", nrow(search)+1:nrow(ref))
+dbDisconnect(db)
+```
+
+### 2. Using a diverse set of classifiers, partition all documents in S into two groups: T and S \ T ,as follows: 
++  (a) Define a training set by drawing a random sample from R and S. 
+```{r}
+# Select a sample of the data for the classifier 
+ref$type <- "ref"
+search$type <- "search"
+
+keyword <- rbind(ref, search)
+```
+
+Create quanteda corpus with headline as body
+```{r}
+keyword_corpus <- corpus(keyword, text_field = "text") 
+docnames(keyword_corpus) <- keyword$id
+
+# Create DFM
+headline_dfm <- tokens(keyword_corpus, remove_punc = TRUE, remove_symbols = TRUE, remove_url = TRUE, remove_separators = TRUE) %>%
+  tokens_remove(stopwords("english"), padding = TRUE) %>%
+  tokens_ngrams(n = 1:2) %>%
+  dfm() %>%
+  dfm_trim(min_docfreq = 0.001, docfreq_type = "prop", verbose = TRUE)
+```
+
+
+Some descriptive statistics
+```{r}
+# Examine the top features in the corpus. Set n to different values to see n-words.
+topfeatures(headline_dfm, n=25)
+
+# Quicly plot a wordcloud to examine top features 
+textplot_wordcloud(headline_dfm, rotation=0, min_size=.75, max_size=3, max_words=50)
+```
+
++  (b) Fit one or more classifiers to the training set using as the outcome whether each document is in R or S. 
++  (c) Use parameters from classifiers fit to the training set to estimate the predicted probability of R membership for each document in S.(Of course, every document is in S, and so the prediction mistakes can be highly informative.) 
+```{r}
+# set seed
+set.seed(1234)
+
+# Splitting into training and testing
+set.seed(1234)
+all_indices <- 1:nrow(keyword)
+all_indices <- sample(all_indices)
+train_indices <- all_indices[1:8000]
+test_indices <- all_indices[8001:length(all_indices)]
+train_idx <- sort(train_indices)
+test_idx <- sort(test_indices)
+all_idx <- 1:nrow(keyword)
+train_bool <- all_idx %in% train_idx
+test_bool <- all_idx %in% test_idx 
+
+# generate random indexes (choosing a 70-30 training-test split)
+dfm_train <- dfm_subset(headline_dfm, train_bool)
+dfm_test <- dfm_subset(headline_dfm, test_bool)
+```
+
+```{r}
+# NaiveBayes
+
+# Run Model
+tmod_nb <- textmodel_nb(dfm_train, dfm_train$type)
+summary(tmod_nb)
+
+# Get Posteriors Class Probabilities of N-Grams
+get_posterior <- function(nb) {
+  PwGc <- nb$param
+  Pc <- nb$priors
+  PcGw <- PwGc * base::outer(Pc, rep(1, ncol(PwGc)))
+  PcGw <- matrix(sapply(PcGw, function(x) sqrt(sum(x^2))), nrow=2, dimnames = dimnames(PwGc))
+  names(dimnames(PcGw))[1] <- names(dimnames(PwGc))[1] <- "classes"
+  PwGc
+}
+
+nb_probs <- as.data.frame(get_posterior(tmod_nb))
+nb_probs[,c("crisis")]
+
+## SOLVED with earlier creation of DFM when texts were joined
+## We do this because Naive Bayes can only take into consideration features 
+## that occur in both the training and test set
+## dfm_match <- dfm_match(dfm_test, features = featnames(dfm_train))
+
+# Predicting on Test Set and Evaluating Fit
+nb_preds <- predict(tmod_nb, newdata = dfm_test)
+
+nb_confusion <- table(Predicted = nb_preds, Truth = dfm_test$type)
+nb_confusion
+nb_performance <- confusionMatrix(nb_confusion)
+nb_performance
+nb_performance$byClass
+# F1 of 0.951
+# Precision of 0.925
+# Recall of 0.979
+
+# Apply to entire data frame to get predictions for all documents
+nb_preds_all <- as.data.frame(predict(tmod_nb, newdata = headline_dfm), optional = TRUE)
+nb_preds_all$id <- rownames(nb_preds_all)
+rownames(nb_preds_all) <- NULL
+colnames(nb_preds_all)<- c("pred_nb", "id")
+```
+
+```{r}
+# SVM
+
+# Run Model
+tmod_svm <- textmodel_svm(dfm_train, dfm_train$type)
+
+# Predict and Performance
+svm_preds <- predict(tmod_svm, newdata = dfm_test, type="class")
+
+svm_confusion <- table(Predicted = svm_preds, Truth = dfm_test$type)
+svm_confusion
+svm_performance <- confusionMatrix(svm_confusion)
+svm_performance
+svm_performance$byClass
+# F1 of 0.989
+# Precision of 0.992
+# Recall of 0.985
+
+# Extend to all documents
+svm_preds_all <- as.data.frame(predict(tmod_svm, newdata = headline_dfm), optional = TRUE)
+svm_preds_all$id <- rownames(svm_preds_all)
+rownames(svm_preds_all) <- NULL
+colnames(svm_preds_all) <- c("pred_svm", "id")
+```
+
+```{r eval=FALSE}
+# This chunk doesn't work
+# Logit
+tmod_logit <- textmodel_lr(dfm_train, dfm_train$type)
+pred_logit <- predict(tmod_logit, new_data = dfm_test, type = "class")
+tab_logit <- table(predicted = pred_logit, actual = dfm_test$type)
+
+confusionMatrix(tab_svm, mode = "everything", positive = "ref")
+
+pred_logit_all <- predict(tmod_logit, keywords_dfm, type="class")
+predicted_probs_logit <- as.data.frame(pred_logit_all, optional = TRUE)
+ind <- rownames(predicted_probs_logit)
+predicted_probs_logit$idx <- ind
+rownames(predicted_probs_logit) <- NULL
+colnames(predicted_probs_logit)<- c("pred_logit", "idx")
+
+predicted_probs <- merge(predicted_probs, predicted_probs_logit)
+```
+
+```{r}
+# Ridge
+
+# Run Model
+mod_ridge <- cv.glmnet(x=dfm_train, y=dfm_train$type,
+                   alpha=0, nfolds=10, family="binomial")
+
+# Predict and Performance
+ridge_preds <- predict(mod_ridge, dfm_test, type="class")
+ridge_confusion <- table(Predicted = ridge_preds, Truth = dfm_test$type)
+ridge_confusion
+ridge_performance <- confusionMatrix(ridge_confusion)
+ridge_performance
+ridge_performance$byClass
+# F1 of 0.898
+# Precision of .99
+# Recall of 0.81
+
+# Extracting Feature Specific Coefficients
+best.lambda <- which(mod_ridge$lambda==mod_ridge$lambda.1se)
+beta <- mod_ridge$glmnet.fit$beta[,best.lambda]
+
+## Identifying Predictive Features
+ridge_predfeats <- data.frame(coef = as.numeric(beta),
+                ngram = names(beta), stringsAsFactors=F)
+
+## Lowest and highest coefficients
+ridge_keywords <- ridge_predfeats[order(ridge_predfeats$coef),]
+head(ridge_keywords[,c("coef", "ngram")], n=10)
+tail(ridge_keywords[,c("coef", "ngram")], n=10)
+
+# Extending to all documents
+ridge_preds_all <- as.data.frame(predict(mod_ridge, headline_dfm, type="class", s = "lambda.1se"), optional = TRUE)
+ridge_preds_all$id <- rownames(ridge_preds_all)
+rownames(ridge_preds_all) <- NULL
+colnames(ridge_preds_all) <- c("pred_ridge", "id")
+
+## identifying predictive features across all DF
+# ridge_keywords <- data.frame(coef = as.numeric(beta),
+#                ngram = names(beta), stringsAsFactors=F)
+
+```
+
+```{r}
+# Lasso
+# Run Lasso
+mod_lasso <- cv.glmnet(x=dfm_train, y=dfm_train$type,
+                   alpha=1, nfolds=10, family="binomial")
+
+# Predict and Performance
+lasso_preds <- predict(mod_lasso, dfm_test, type="class")
+lasso_confusion <- table(Predicted = lasso_preds, Truth = dfm_test$type)
+lasso_confusion
+lasso_performance <- confusionMatrix(lasso_confusion)
+lasso_performance
+lasso_performance$byClass
+# F1 of 0.981
+# Precision of 0.994
+# Recall of 0.969
+
+# extracting coefficients
+best.lambda <- which(mod_lasso$lambda==mod_lasso$lambda.1se)
+beta <- mod_lasso$glmnet.fit$beta[,best.lambda]
+
+## identifying predictive features
+lasso_keywords <- data.frame(coef = as.numeric(beta),
+                ngram = names(beta), stringsAsFactors=F)
+
+# note that some features become 0
+table(lasso_keywords$coef==0)
+
+lasso_keywords <- lasso_keywords[order(lasso_keywords$coef),]
+head(lasso_keywords[,c("coef", "ngram")], n=10)
+tail(lasso_keywords[,c("coef", "ngram")], n=10)
+
+# Extending to all documents
+lasso_preds_all <- as.data.frame(predict(mod_lasso, headline_dfm, type="class", s = "lambda.1se"), optional = TRUE)
+lasso_preds_all$id <- rownames(lasso_preds_all)
+rownames(lasso_preds_all) <- NULL
+colnames(lasso_preds_all) <- c("pred_lasso", "id")
+
+pred_list <- list(nb_preds_all, svm_preds_all, ridge_preds_all, lasso_preds_all)
+predictions <- pred_list %>% reduce(full_join, by='id')
+write.csv(predictions, 'text_predictions_keywordsearch.csv', row.names=FALSE)
+```
+
+LightGBM
+```{r eval=FALSE}
+# Training LighGBM
+headline_df <- convert(headline_dfm, to = "data.frame")
+headline_df <- cbind(headline_df, headline_dfm$type)
+
+training_indices <- all_indices[1:7000]
+validation_indices <- all_indices[7001:8000]
+
+# Transforming features and the dataframe
+dataset_lgbm <- lgb.convert_with_rules(
+  data = headline_df)$data %>% as.matrix()
+
+# Training dataset
+training_dataset <- lgb.Dataset(
+  data = dataset_lgbm[training_indices,2:(ncol(dfm_train_gbm)-1)],
+  label = dataset_lgbm[training_indices,ncol(dfm_train_gbm)],
+  params = list(verbose = -1))
+
+# Validation dataset
+validation_dataset <- lgb.Dataset.create.valid(
+  dataset = training_dataset,
+  data = dataset_lgbm[validation_indices,2:(ncol(dfm_train_gbm)-1)],
+  label = dataset_lgbm[validation_indices,ncol(dfm_train_gbm)],
+  params = list(verbose = -1))
+
+# Creating test_X and test_y as simple matrices/vectors
+train_x_lgbm <- dataset_lgbm[training_indices,2:(ncol(dfm_train_gbm)-1)]
+train_y_lgbm <- dataset_lgbm[training_indices,ncol(dfm_train_gbm)]
+
+
+test_x_lgbm <- dataset_lgbm[test_indices,2:(ncol(dfm_train_gbm)-1)]
+test_y_lgbm <- dataset_lgbm[test_indices,ncol(dfm_train_gbm)]
+
+# Setting parameters
+params <- list(objective = "binary", metric = "binary_logloss", 
+ is_unbalance = TRUE, learning_rate = 0.01, max_depth = 150,
+ early_stopping = 50)
+
+
+lgb_mod <- lgb.train(
+  params = params,
+  data = training_dataset,
+  nrounds = 100000, # note: needs to be larger for very small learning rates
+  valids = list(training = training_dataset, validation = validation_dataset),
+  verbose = -1
+)
+
+lgb_preds <- predict(lgb_mod, test_x_lgbm, reshape = TRUE)
+
+# Extending to all the data
+all_x_lgbm <- dataset_lgbm[,2:ncol(songs_te_current)-1]
+lgb_preds_all <- predict(lgb_mod, all_x_lgbm)
+```
+
++  (d) Aggregate predicted probabilities or classifications into a single score (indicating probability of membership in T )for each document in S. 
++  (e) Partition S into T and S \ T based on the score for each document and a user-chosen threshold. 
+
+```{r}
+# Transforming Predictions for Keyword Search
+#predictions <- read_csv("predictions_keywordsearch.csv")
+predictions$pred_svm <- ifelse(predictions$pred_svm=="search",0,1)
+predictions$pred_nb <- ifelse(predictions$pred_nb=="search",0,1)
+predictions$pred_ridge <- ifelse(predictions$pred_ridge=="search",0,1)
+predictions$pred_lasso <- ifelse(predictions$pred_lasso=="search",0,1)
+
+predictions <- predictions %>%
+  relocate(id)
+
+predictions$classified <- rowSums(predictions[, 2:ncol(predictions)])
+
+new_target <- (predictions %>%
+  filter(classified > 2))$id
+
+dfm_target <- dfm_subset(headline_dfm, id %in% new_target)
+dfm_search <- dfm_subset(headline_dfm, !id %in% new_target)
+# Captured even less than the documents in the reference set
+#dfm_target$final_class <- "target"
+#dfm_search <- dfm_subset(headline_dfm, !id_numeric %in% new_target)
+#dfm_search$final_class <- "search"
+#dfm_subsample <- rbind(dfm_target, dfm_search)
+```
+
+3. Find keywords that best classify documents into either T or S \ T , as follows:
++  (a) Generate a set of potential keywords by mining S for all words that occur above a chosen frequency threshold, KS.
+```{r}
+dfm_search_keywords <- dfm_search %>%
+  dfm_trim(min_docfreq = 0.002, docfreq_type = "prop", verbose = TRUE)
+# Keywords occuring in more than 35 documents
+```
++  (b) Decide whether each keyword k ∈ K S characterizes T or S \ T better, by comparing the proportion of documents containing k in T with the proportion of documents containing k in S \ T . 
+```{r}
+# Find the proportion of documents containing k ∈ Ks in S \ T
+search_df <- convert(dfm_weight(dfm_search_keywords, scheme = "prop"), to = "data.frame")
+
+agg_df <- search_df[, 2:ncol(search_df)] %>%
+  mutate_if(is.numeric, ~1 * (. != 0))
+
+agg_df <- setNames(data.frame(t(agg_df[,-1])), search_df$doc_id)
+agg_df <- as.data.frame(rowSums(agg_df))
+colnames(agg_df) <- c("count_search")
+agg_df <- agg_df %>%
+  mutate(prop_search = count_search / nrow(search_df))
+```
+
+```{r}
+# Find the proportion of documents containing k ∈ Ks in T
+keywords_search <- featnames(dfm_search_keywords)
+target_df <- convert(dfm_select(dfm_target, pattern = keywords_search, selection = "keep", valuetype = "fixed") %>%
+  dfm_weight(scheme = "prop"), to = "data.frame")
+
+agg_target <- target_df[, 2:ncol(target_df)] %>%
+  mutate_if(is.numeric, ~1 * (. != 0))
+
+agg_target <- setNames(data.frame(t(agg_target[,-1])), target_df$doc_id)
+agg_target <- as.data.frame(rowSums(agg_target))
+colnames(agg_target) <- c("count_target")
+agg_target <- agg_target %>%
+  mutate(prop_target = count_target / nrow(target_df))
+
+agg_df <- cbind(agg_target, agg_df)
+agg_df$feat <- rownames(agg_df)
+rownames(agg_df) <- NULL
+
+top_50_keywords_prop <- (agg_df %>%
+  filter(prop_target > 0.001 & prop_search < 0.005) %>%
+  arrange(desc(prop_target)))[1:50,]
+
+write.csv(agg_df, 'text_wordproportions_target_search.csv', row.names=FALSE)
+
+write.csv(top_50_keywords_prop, "text_top50keywords_proportion.csv", row.names = FALSE)
+```
+
++  (c) Rank keywords characterizing T by a statistical likelihood score that measures how well the keyword discriminates T from S \ T . Do the analogous ranking for keywords characterizing S \ T.
+```{r}
+# Using Texstats Keynes
+dfm_target$class <- "target"
+dfm_search$class <- "search"
+dfm_reclassified <- rbind(dfm_target, dfm_search)
+
+
+stat_key <- textstat_keyness(dfm_reclassified, 
+                              target = dfm_reclassified$class == "target")
+
+top_50_keywords_keyness <-stat_key[0:50]
+
+g <- textplot_keyness(stat_key, margin = 0.25, labelsize = 3)
+g <- g + labs(title = "Relative Frequency Analysis (Keyness) - Target vs. Search Documents")
+g
+
+write.csv(top_50_keywords_keyness, "text_top50keywords_keyness.csv", row.names = FALSE)
+```
+
+4. Present keywords in two lists to the user, to iterate and choose words of interest or for use in building a document retrieval query. 
+5. If sufficient computational power is available, rerun Steps 1–4 every time the user makes a measurable decision, such as adding a keyword to QT to improve the lists of keywords to consider.

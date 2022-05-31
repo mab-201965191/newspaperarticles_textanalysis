@@ -1,0 +1,308 @@
+---
+title: "Thesis Data Part I: Creating the DFM"
+author: "Maria A Bravo"
+date: "23/3/2022"
+output: html_document
+---
+
+## Preliminary Data Collection and Analysis
+
+### Set-Up Code
+```{r}
+#install.packages("tesseract")
+#install.packages("pdftools")
+
+# For data wrangling
+library("tidyverse")
+library("lubridate")
+library("readxl")
+# For text analysis
+library("pdftools")
+library("stringr")
+library("quanteda")
+library("readtext")
+
+# For SQL
+library(DBI)
+library(RSQLite)
+
+# For sentiment
+#devtools::install_github("quanteda/quanteda.sentiment")
+#devtools::install_github("kbenoit/quanteda.dictionaries")
+
+Sys.setenv(LANG = "en")
+```
+
+### Setting-up the environment
+1. The PDFs, .txt or .DOCX files are parsed into R using the `pdf_text` function which returns a character vector with one row corresponding to one page. In the code chunk below we set the working directory, read in the files (no need to decompress) and identify key docvars - year and news source.
+
+```{r}
+# Make sure to set your working directory to the folder where your data resides. 
+#setwd("C:/Users/maria/OneDrive/Documents/ASDS/Dissertation_T1/Dissertation_T2/Data")
+setwd("//students.lse.ac.uk/bravorey/Dissertation_T2/Data")
+# Create a SQLite database to store the data
+db <- dbConnect(RSQLite::SQLite(), "H:/Dissertation_T2/Data/news_data.sqlite")
+
+dbListTables(db)
+#dbRemoveTable(db, "news_articles")
+```
+```{r}
+# Cleaning previous SQLite Table
+reference_set <- dbGetQuery(db, "SELECT * FROM news_articles")
+drop <- c(2, 10)
+reference_set <- reference_set[,-drop]
+
+reference_set_two <- dbGetQuery(db, "SELECT * FROM reference_set")
+
+reference_set <- rbind(reference_set, dbGetQuery(db, "SELECT * FROM reference_set"))
+
+# Finding how many duplicates there are in reference_set
+# There are 190 exact title duplicates
+sum(duplicated(reference_set$title))
+
+# There are 127 unique title duplicates
+reference_set[duplicated(reference_set$title),] %>%
+  group_by(title) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+most_repeated_tile <- (reference_set[duplicated(reference_set$title),] %>%
+  group_by(title) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)))[1,1]
+
+# Download document name is it messes up the recognition of unique 
+# articles, plus it doesn't really add anything to the analysis
+reference_set <- reference_set[, 2:ncol(reference_set)]
+
+# There are 22 exact duplicates (removed)
+reference_set <- reference_set %>%
+  distinct()
+
+dbRemoveTable(db, "reference_set")
+dbRemoveTable(db, "news_articles")
+
+dbWriteTable(db, "reference_set", reference_set)
+
+dbDisconnect(db)
+```
+
+### Extracting Data
+Do not run this function if you've already saved your data in a SQL database
+```{r}
+# Create function to extract data
+extract_data <- function(file_names, doc_format = ".ZIP", title = "default"){
+  
+  doctype <- doc_format
+  filt_fls <- file_names[grep(doctype, file_names)]
+  news_all <- NULL
+  
+  for (fl in filt_fls){
+    
+    #1. Extract files
+    #all_fls <- unzip(zipfile = fl, list = TRUE)
+    
+    #2. Read in .zip data and create docvars
+    news <- readtext(file = tolower(fl))
+    
+    news <- as.data.frame(news)
+    news <- news %>%
+      separate(text, into = c("metadata", "text"), sep = "\nBody\n")
+    
+    news <- news %>%
+      separate(text, into = c("text", "load_date"), sep = "\nLoad-Date:")
+    
+    news <- news %>% separate(load_date, c('load_date', 'del'), sep = "\n") %>%
+      select(-del)
+    
+    news$headline <- NA
+    news$source <- NA
+    news$date_published <- NA
+    news$edition <- NA
+    news$copyright <- NA
+    news$section<- NA
+    news$length <- NA
+    news$byline <- NA
+    news$dateline <- NA
+    news$highlight <- NA
+    news$other <- NA
+    news$date_formatted
+    
+    for (article in (1:nrow(news))) {
+      md <- NULL
+      md <- str_split(news$metadata[article], pattern = "\n")
+      
+      news$headline[article] <- md[[1]][1]
+      news$source[article] <- md[[1]][2]
+      news$date_published[article] <- md[[1]][3]
+      
+      for (i in 4:length(md[[1]])) {
+        if (grepl("Copyright", md[[1]][i])) {
+          news$copyright[article] <- md[[1]][i]
+        } else if (grepl("Section", md[[1]][i])) {
+          news$section[article] <- md[[1]][i]
+        } else if (grepl("Length", md[[1]][i])) {
+          news$length[article] <- md[[1]][i]
+        } else if (grepl("Byline", md[[1]][i])) {
+          news$byline[article] <- md[[1]][i]
+        } else if (grepl("Highlight", md[[1]][i])) {
+          news$highlight[article] <- md[[1]][i]
+        } else if (grepl("Edition", md[[1]][i])) {
+          news$edition[article] <- md[[1]][i]
+        } else if (grepl("Dateline", md[[1]][i])) {
+          news$dateline[article] <- md[[1]][i]
+        } else {
+          news$other[article] <- md[[1]][i]
+        }
+      }
+    }
+    
+    news <- news %>%
+      separate(load_date, c('load_date', 'del'), sep = "\n") %>%
+      select(-del)  %>%
+      separate(section, c('del', 'section'), sep = ":") %>%
+      select(-del) %>%
+      separate(byline, c('del', 'byline'), sep = ":") %>%
+      select(-del) %>%
+      separate(highlight, c('del', 'section'), sep = ":") %>%
+      select(-del) %>%
+      separate(dateline, c('del', 'dateline'), sep = ":") %>%
+      select(-del)
+    
+    news$length <- ifelse(grepl("Length", news$length), gsub("\\D","",news$length), "NA")
+    news$date_published <- str_extract(news$date_published, ".+?(\\d{4})")
+    news$date_formatted <- mdy(news$date_published)
+    
+    news <- news %>% select(-metadata, -doc_id)
+    num_news <- nrow(news)
+    
+    print(sprintf("DF contains %g articles", num_news))
+    
+    # 3. Removing exact duplicates
+    news <- news %>% distinct ()
+    num_news_distinct <- nrow(news)
+    
+    print(sprintf("%g exact duplicate articles were removed", num_news - num_news_distinct))
+      
+    
+    #Writing Table (append method on to add new articles)
+    dbWriteTable(db, title, news, append = TRUE)
+  }
+  }
+```
+
+Loading General News Data from Lexis Nexis 
+```{r warning=FALSE}
+# Loading the Search_Set (General News, 2018-2020)
+
+# Get a vector with the filenames you want to donwload
+# fls <- list.files("//students.lse.ac.uk/bravorey/Dissertation_T2/Data", recursive = TRUE, full.name= TRUE)
+
+search_fls <- list.files("//students.lse.ac.uk/bravorey/Dissertation_T2/Data/search set", recursive = TRUE, full.name= TRUE)
+
+# Run function on the file names to create search set
+extract_data(search_fls, title = "search_set")
+
+# Create dataframe with search set
+all <- dbGetQuery(db, "SELECT * FROM search_set")
+
+# Formatting date
+all$date_formatted <- as.Date(all$date_formatted, origin = lubridate::origin)
+
+all$weeks <- week(all$date_formatted)
+all$year <- year(all$date_formatted)
+
+# Looking at duplicates, again
+all <- all %>%
+  distinct()
+
+sum(duplicated(all))
+# There are 999 duplicate articles. 
+
+all %>%
+  group_by(text) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  filter(count > 1)
+
+# Plotting weekly counts
+all$weeks <- cut(all[,"date_formatted"], breaks="week")
+agg <- all %>% group_by(weeks) %>% summarise(count = n())
+agg <- agg[1:nrow(agg)-1, ]
+
+ggplot(agg, aes(x = as.Date(weeks), y = count)) +
+  geom_point() +
+  scale_x_date(date_breaks = "months" , date_labels = "%b-%y") +
+  ylab("Aggregated by Week") + 
+  xlab("Week") + 
+  geom_line() + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+# Showing the number of articles published by source
+all %>% 
+  group_by(source) %>% 
+  summarise(count = n()) %>%
+  arrange(desc(count))
+ 
+#dbRemoveTable(db, "search_set")
+#dbListTables(db)
+```
+Loading Humanitarian News from Lexis Nexis
+```{r warning=FALSE}
+# Loading the Reference Set
+
+# Search Query (humanitarian AND crisis OR disaster)
+# Filtered by year (01/01/YYY - 31/12/YYYY)
+# According to LexisNexis' Relevance Hit
+
+# Get a vector with the filenames you want to donwload
+# fls <- list.files("//students.lse.ac.uk/bravorey/Dissertation_T2/Data", recursive = TRUE, full.name= TRUE)
+
+ref_fls <- list.files("//students.lse.ac.uk/bravorey/Dissertation_T2/Data/reference set", recursive = TRUE, full.name= TRUE)
+add_ref_fls <- list.files("//students.lse.ac.uk/bravorey/Dissertation_T2/Data/reference set/additional_batch", recursive = TRUE, full.name= TRUE)
+
+# Run function on the file names to create search set
+extract_data(ref_fls, title = "reference_set")
+extract_data(add_ref_fls, title = "reference_set")
+
+# Create dataframe with search set
+ref <- dbGetQuery(db, "SELECT * FROM reference_set")
+
+# Selecting unique
+nrow(ref)
+
+nrow(ref %>%
+         distinct())
+
+# 172 exact duplicates removed
+ref <- ref %>% distinct()
+
+# Formatting date
+ref$date_formatted <- as.Date(ref$date_formatted, origin = lubridate::origin)
+
+ref$weeks <- week(ref$date_formatted)
+ref$year <- year(ref$date_formatted)
+
+# Plotting weekly counts
+ref$weeks <- cut(ref[,"date_formatted"], breaks="week")
+agg <- ref %>% group_by(weeks) %>% summarise(count = n())
+agg <- agg[1:nrow(agg)-1, ]
+
+ggplot(agg, aes(x = as.Date(weeks), y = count)) +
+  geom_point() +
+  scale_x_date(date_breaks = "years" , date_labels = "%b-%y") +
+  ylab("Aggregated by Week") + 
+  xlab("Week") + 
+  geom_line() + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+# Showing the number of articles published by source
+ref %>% 
+  group_by(source) %>% 
+  summarise(count = n()) %>%
+  arrange(desc(count))
+ 
+ #dbRemoveTable(db, "search_set")
+#dbListTables(db)
+#dbDisconnect(db)
+```

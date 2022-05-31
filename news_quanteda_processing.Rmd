@@ -1,0 +1,304 @@
+---
+title: "quanteda_text_processing"
+author: "Maria Antonia Bravo"
+date: "30/05/2022"
+output: html_document
+---
+```{r}
+library("quanteda")
+library("readtext")
+library("quanteda.textmodels")
+library("quanteda.textplots")
+library("quanteda.textstats")
+#devtools::install_github("quanteda/quanteda.sentiment")
+library("quanteda.sentiment")
+library("quanteda.dictionaries")
+library("seededlda")
+library("lubridate")
+
+```
+
+#Quanteda
+## Creating a quanteda corpus
+Next, we create a quanteda corpus which will enable us to perfom the analysis.
+```{r}
+# Create quanteda corpus with text as body
+docid <- paste0("text", 1:nrow(news))
+news <- cbind(news, docid)
+
+news_corpus <- corpus(news, text_field = "text", docvars = c("title", "source", "date_published_posixt", "load_date_posixt"), docid_field = "docid") 
+
+# Create quanteda corpus with headline as body
+news_corpus_hl <- corpus(news, text_field = "title", docvars = c("source", "date_published_posixt", "load_date_posixt"), docid_field = "docid")
+
+# Create tokens
+tokens_news <- tokens(news_corpus, remove_punc = TRUE, remove_symbols = TRUE, remove_url = TRUE, remove_separators = TRUE) %>%
+  tokens_ngrams(n = 1:2)
+
+#3. Create document feature matrix
+
+# We can also remove_punct, remove_url, 
+dfm_news <- dfm(tokens_news) %>%
+  dfm_remove(stopwords("english")) %>%
+  dfm_trim(min_docfreq = 0.01, docfreq_type = "prop", verbose = TRUE) 
+```
+
+# Pre-processing: Filtering relevant texts
+## Identifying similar texts
+```{r}
+# Looking at the number of documents with exactly similar headlines 
+length(unique(news$title))
+
+## Using co-sine similarity
+# Measures cosine similarity between documents (how similar they are)
+simil <- as.data.frame(textstat_simil(dfm_news, method = "cosine", margin = "documents", min_simil = 0.6, diag = FALSE))
+
+simil %>%
+  filter(cosine ==1) %>%
+  arrange(document1)
+
+simil %>%
+  filter(cosine ==1) %>%
+  arrange(document1) %>%
+  group_by(document1) %>%
+  summarise(count = n())
+# 236 texts have a cosine similarity of 1
+
+simil %>%
+  filter(cosine > 0.8) %>%
+  arrange(document1) %>%
+  group_by(document1) %>%
+  summarise(count = n())
+# 353 texts have a cosine similarity greater than 0.8
+
+# Example 1 - Same article, different publication
+# This example is a press release
+print(docvars(corpus_subset(news_corpus, docid_nums == 172)))
+print(docvars(corpus_subset(news_corpus, docid_nums == 173)))
+```
+
+# Latent Dirichlet Allocation Topic Models
+## Running topic models to determine whether it is viable to filter articles based on their topics
+```{r}
+tmod_lda <- textmodel_lda(dfm_news, k = 10)
+terms(tmod_lda, 10)
+
+head(topics(tmod_lda), 10)
+
+# assign topic as a new document-level variable
+topics <- as.data.frame(topics(tmod_lda))
+  
+# cross-table of the topic frequency
+table(topics)
+
+topics <- topics %>%
+  rownames_to_column("doc_id")
+
+topics <- separate(topics, doc_id, c("discard", "doc_num"), sep = "text") %>%
+  select(-discard)
+
+colnames(topics)[which(names(topics) == "topics(tmod_lda)")] <- "topics"
+
+topic_one <- topics %>%
+  filter(topics == "topic1") %>%
+  select(doc_num)
+
+(news %>% filter(docid_nums %in% topic_one$doc_num))$title
+
+docid_nums
+```
+
+# Descriptive Statistics
+
+Examine top features
+```{r}
+# Examine the top features in the corpus. Set n to different values to see n-words.
+topfeatures(dfm_news, n=25)
+
+# Quicly plot a wordcloud to examine top features 
+textplot_wordcloud(dfm_news, rotation=0, min_size=.75, max_size=3, max_words=50)
+```
+
+## Frequency of works and key words in context (KWIC)
+Search for frequency of specific words (does not use dfm but df with text column)
+Tip: use regular expressions to make sure your searches return all relevant results.
+
+```{r}
+# Count number of occurences of specific words
+length(grep('death*', news$text, ignore.case=TRUE))
+length(grep('immigr*', news$text, ignore.case=TRUE))
+length(grep('disaster*', news$text, ignore.case=TRUE))
+length(grep('humanitarian*', news$text, ignore.case=TRUE))
+
+# See the keywords in context. Beware that dimensionality grows rapidly if its a very common
+# keyword as it select all instances of the string. 
+
+#tokens_news <- tokens(news_corpus[1:10]) #restrict searh if it is very common
+keywordsearch <- kwic(tokens_news, pattern = "climate", valuetype = "regex", window = 5) #uncomment if you want to save query
+kwic(tokens_news, pattern = "colombia", valuetype = "regex", window = 5)
+refugee_keywordsearch <- kwic(tokens_news, pattern = "refugee", valuetype = "regex", window = 10)
+```
+
+
+### Sentiment Dictionary
+Exploring dictionary methods to filter corpus. 
+```{r}
+# Load sentiment dictionary
+data(data_dictionary_geninqposneg)
+pos.words <- data_dictionary_geninqposneg[['positive']]
+neg.words <- data_dictionary_geninqposneg[['negative']]
+sent_dictionary <- dictionary(list(positive = pos.words, 
+                                   negative = neg.words))
+
+# Create a dfm with proportion
+weighted_news_dfm <- dfm_weight(dfm_news, scheme = "prop")
+
+sent <- dfm_lookup(weighted_news_dfm, sent_dictionary)
+news$sentiment_score <- as.numeric(sent[,1]) - as.numeric(sent[,2])
+news$sentiment_class <- "neutral"
+news$sentiment[news$sentiment_score < 0] <- "negative"
+news$sentiment[news$sentiment_score > 0] <- "positive"
+
+table(news$sentiment)
+# Majority of news are positive (not expected)
+
+# Count news sources by number of articles
+news_sources <- news %>% 
+  count(outlet) %>%
+  arrange(desc(n))
+
+# Filter top three outlets
+top5_news_sources <- news_sources[1:5,1]
+
+for (source in top5_news_sources){
+  message(source, " -- average sentiment: ",
+      round(mean(news$sentiment_score[news$outlet==source]), 4)
+  )
+}
+
+grouped_mean <- news %>%
+  group_by(week = floor_date(date_posixt, unit = "week")) %>%
+  summarise(average_sentiment = mean(sentiment_score))
+
+ggplot(grouped_mean, aes(x = week, y = average_sentiment)) + 
+  geom_point() + 
+  geom_smooth(method = 'lm', se = FALSE) + 
+  labs (title = "Average sentiment of articles per week", 
+        xlab = "Date", 
+        ylab = "Average sentiment")
+
+ggplot(news, aes(x = date_posixt, y = sentiment_score, color = sentiment)) + 
+  geom_point() + 
+  labs (title = "Sentiment score of articles in the corpora", 
+        xlab = "Date", 
+        ylab = "Sentiment score")
+```
+
+### Defined dictionary
+```{r}
+mytexts <- c("We are not schizophrenic, but I am.", "I bought myself a new car.")
+myThes <- dictionary(list(pronouns = list(firstp = c("I", "me", "my", "mine", "myself", "we", "us", "our", "ours"))))
+myDfm <- dfm(mytexts, thesaurus = myThes)
+myDfm
+```
+
+Notice how the thesaurus key has been made into uppercase---this is to identify it as a key, as opposed to a word feature from the original text.
+
+Try running the articles and conjunctions dictionary from the previous exercise on `mytexts` as a thesaurus, and compare the results. What is the main difference?
+
+**When the dictionary is used as a thesaurus, the features which are not matched to dictionary entries are retained. This is in contrast to using it as a dictionary where non-matched features are dropped from the dfm.**
+
+```{r}
+myDfmFunc <- dfm(mytexts, thesaurus = posDict)
+myDfmFunc
+```
+
+
+When you call `dfm()` with a `dictionary = ` or `thesaurus = ` argument, then what `dfm()` does internally is actually to first construct the entire dfm, and then select features using a call to `dfm_lookup()`.
+
+Try creating a dfm object using the first five inaugural speeches, with no dictionary applied.  Then apply the `posDict` from the earlier question to select features 
+
+a) in a way that replicates the `dictionary` argument to `dfm()`, 
+b) in a way that replicates the `thesaurus` argument to `dfm()`. 
+
+```{r}
+inaugFive <- data_corpus_inaugural[1:5]
+inaugFiveDfm <- dfm(inaugFive)
+
+# a) Replicate "dictionary = posDict"
+dfm_lookup(inaugFiveDfm, posDict, exclusive = TRUE)
+
+# b) Replicate "thesaurus = posDict"
+dfm_lookup(inaugFiveDfm, posDict, exclusive = FALSE)
+```
+
+# SpacyR - Named-Entity Recognition
+
+```{r}
+#library(reticulate)
+#devtools::install_github("quanteda/spacyr", build_vignettes = FALSE)
+
+library("spacyr")
+#spacy_install()
+spacy_initialize(model = "en_core_web_lg", save_profile = TRUE)
+```
+
+```{r}
+# Note - The number of documents it can parse is low since it tokenizes into a df - high dimensional. 
+sample_text <- news$title[1:100]
+parsedtxt <-spacy_parse(sample_text, tag = TRUE, entity = TRUE, lemma = FALSE, nounphrase = TRUE)
+
+entities <- entity_extract(parsedtxt)
+
+entities_two <- nounphrase_extract(parsedtxt)
+
+# This function tends to take less time. 
+entities_all <- spacy_extract_entity(tolower(news$text[1:20]))
+
+entities_all %>%
+  filter(ent_type == "PERSON")
+
+entities_all %>%
+  filter(ent_type == "ORG")
+
+spacy_finalize()
+```
+
+
+```{r}
+load("~/ASDS/Dissertation_T1/Dissertation_T2/Data/GEDEvent_v21_1.RData")
+ucdp_ged <- GEDEvent_v21_1
+rm(GEDEvent_v21_1)
+
+summary(ucdp_ged)
+
+# Type of Violence
+violence <- table(ucdp_ged$type_of_violence, ucdp_ged$year)
+
+barplot(violence, main = "Number of Events in UCDP per Year", xlab = "Year", col = c("lightblue", "blue", "darkblue"))
+legend ("topleft", inset = 0.05, title = "Type of Conflict", c("State-Based Conflict", "Non-State-Conflict", "One-Sided Violence"), fill = c("lightblue", "blue", "darkblue"))
+
+# Results in 86,072 observations
+ucdp_ged %>%
+  filter(!is.na(source_office) & year >= 2015)
+
+# 86,081 observations (means we only loose 9 observations with Source Office)
+ucdp_ged %>%
+  filter(year >= 2015)
+
+# Number of deaths
+plot(ucdp_ged$year,ucdp_ged$best)
+```
+
+```{r}
+emdat <- read_excel("emdat_public_alldisasters2000_2022.xlsx")
+
+emdat %>%
+  group_by(Country) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n))
+```
+
+
+
+
