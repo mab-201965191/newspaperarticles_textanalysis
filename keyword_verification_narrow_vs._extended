@@ -1,0 +1,118 @@
+---
+title: "Keyword Search: Comparing Narrow vs. Extended Keywords"
+author: "Maria Antonia Bravo"
+date: '2022-06-09'
+output: html_document
+---
+
+```{r}
+# For data wrangling
+library("tidyverse")
+library("lubridate")
+library("readxl")
+# For text analysis
+library("pdftools")
+library("stringr")
+library("quanteda")
+library("readtext")
+
+# For SQL
+library(DBI)
+library(RSQLite)
+
+```
+
+#Loading in the Data from SQL
+
+```{r}
+# CHAD
+## Narrow Search
+### Q:(cris* or disaster*) and (humanitarian) and (chad)
+### T: January 1, 2017 - July 1, 2017
+### S: All articles
+
+chad_narrow_all <- dbGetQuery(db, "SELECT * FROM chad_narrow_firsthalf_2017_all")
+
+### Q&T (Above)
+### S: First 500 - Relevance
+chad_narrow_rel <- dbGetQuery(db, "SELECT * FROM chad_narrow_firsthalf_2017_relevance")
+
+## Extended Search
+### Q: (cris* or disaster or food or refuge* or aid or assistance or response or war or border) and (humanitarian) and (chad)
+### T: January 1, 2017 - July 1, 2017
+### S: All articles
+chad_extended_all <- dbGetQuery(db, "SELECT * FROM chad_extended_firsthalf_2017_all")
+  
+### Q&T (Above)
+### S: First 500 - Relevance
+chad_extended_rel <- dbGetQuery(db, "SELECT * FROM chad_extended_firsthalf_2017_all")
+  
+# GENERAL NEWS (i.e, not bounded by Country)
+## Narrow Search
+### Q: (cris* or disaster*) and (humanitarian)
+### T: January 1, 2017 - July 1 (500), 2017 & July 2, 20 (500)
+### S: First 500 - Relevance (from both time frames)
+narrow_rel <- dbGetQuery(db, "SELECT * FROM narrow_2017_relevance")
+
+## Extended Search
+## Q:(cris* or disaster or food or refuge* or aid or assistance or response or war or border) and humanitarian
+extended_rel <- dbGetQuery(db, "SELECT * FROM extended_2017_relevance")
+```
+
+Summary Statistics from Articles
+```{r}
+
+list_dfs <- list(chad_extended_all, chad_extended_rel, chad_narrow_all, chad_narrow_rel)
+
+for (ref in 1:length(list_dfs)){
+  
+  # Number of duplicate headlines
+  nrow(list_dfs[[ref]]) - length(unique(list_dfs[[ref]]$headline))
+  
+  # Number of repeated articles
+  nrow(list_dfs[[ref]] %>%
+    group_by(headline) %>%
+    summarise(count = n()) %>%
+    filter(count > 1))
+  
+  # Most repeated article 
+  list_dfs[[ref]][grep((list_dfs[[ref]] %>%
+    group_by(headline) %>%
+    summarise(count = n()) %>%
+    filter(count == max(count)))$headline, list_dfs[[ref]]$headline),]
+  
+  # Showing the number of articles published by source
+  list_dfs[[ref]] %>% 
+    group_by(source) %>% 
+    summarise(count = n()) %>%
+    arrange(desc(count))
+  
+  # Formatting date
+  list_dfs[[ref]]$date_formatted <- as.Date(list_dfs[[ref]]$date_formatted, origin =
+                                              lubridate::origin)
+  
+  list_dfs[[ref]]$weeks <- week(list_dfs[[ref]]$date_formatted)
+  list_dfs[[ref]]$year <- year(list_dfs[[ref]]$date_formatted)
+  
+  # Plotting weekly counts
+  list_dfs[[ref]]$weeks <- cut(list_dfs[[ref]][,"date_formatted"], breaks="week")
+  agg <- list_dfs[[ref]] %>% group_by(weeks) %>% summarise(count = n())
+  agg <- agg[1:nrow(agg)-1, ]
+  
+  ggplot(agg, aes(x = as.Date(weeks), y = count)) +
+    geom_point() +
+    scale_x_date(date_breaks = "years" , date_labels = "%b-%y") +
+    ylab("Aggregated by Week") + 
+    xlab("Week") + 
+    geom_line() + 
+    theme(axis.text.x = element_text(angle = 60, hjust = 1))
+  
+  
+ 
+#dbRemoveTable(db, "search_set")
+#dbListTables(db)
+#dbDisconnect(db)
+```
+
+
+```
