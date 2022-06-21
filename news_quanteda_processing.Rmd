@@ -15,7 +15,7 @@ library("quanteda.sentiment")
 library("quanteda.dictionaries")
 library("seededlda")
 library("lubridate")
-
+library(tidyverse)
 ```
 
 #Quanteda
@@ -47,11 +47,21 @@ dfm_news <- dfm(tokens_news) %>%
 ## Identifying similar texts
 ```{r}
 # Looking at the number of documents with exactly similar headlines 
-length(unique(news$title))
+extended_rel$docid <- 1:nrow(extended_rel)
+
+extended_corpus <- extended_rel %>%
+  corpus(text_field = "text")
+
+extended_dfm <- extended_rel %>%
+  corpus(text_field = "text") %>%
+  tokens(remove_punct = TRUE, remove_url = TRUE, remove_symbols = TRUE) %>%
+  dfm() %>%
+  dfm_remove(stopwords("english")) 
+
 
 ## Using co-sine similarity
 # Measures cosine similarity between documents (how similar they are)
-simil <- as.data.frame(textstat_simil(dfm_news, method = "cosine", margin = "documents", min_simil = 0.6, diag = FALSE))
+simil <- as.data.frame(textstat_simil(extended_dfm, method = "cosine", margin = "documents", min_simil = 0.6))
 
 simil %>%
   filter(cosine ==1) %>%
@@ -61,7 +71,8 @@ simil %>%
   filter(cosine ==1) %>%
   arrange(document1) %>%
   group_by(document1) %>%
-  summarise(count = n())
+  summarise(count = n()) %>%
+  arrange(desc(count))
 # 236 texts have a cosine similarity of 1
 
 simil %>%
@@ -73,8 +84,117 @@ simil %>%
 
 # Example 1 - Same article, different publication
 # This example is a press release
-print(docvars(corpus_subset(news_corpus, docid_nums == 172)))
-print(docvars(corpus_subset(news_corpus, docid_nums == 173)))
+corpus_subset(extended_corpus, docid == 470)
+corpus_subset(extended_corpus, docid == 471)
+```
+
+```{r}
+narrow_rel$docid <- 1000:(nrow(narrow_rel)+999)
+extended_rel$type <- 'extended'
+narrow_rel$type <- 'narrow'
+all <- rbind(extended_rel, narrow_rel)
+
+all_corpus <- all %>%
+  corpus(text_field = "text", docid_field = 'docid')
+
+all_dfm <- all %>%
+  corpus(text_field = "text", docid_field = 'docid') %>%
+  tokens(remove_punct = TRUE, remove_url = TRUE, remove_symbols = TRUE) %>%
+  dfm() %>%
+  dfm_remove(stopwords("english")) 
+
+simil <- as.data.frame(textstat_simil(x = all_dfm, y = all_dfm[c(grep('narrow', all_dfm$type)), ],
+                                      method = "cosine", margin = "documents"))
+
+simil$document1 <- as.numeric(as.character(simil$document1))
+simil$document2 <- as.numeric(as.character(simil$document2))
+
+head(simil)
+
+similarities <- simil %>%
+  filter(document1 < 1000) %>%
+  filter(document2 > 1000) %>%
+  filter(cosine > 0.7) %>%
+  arrange(document1)
+
+similarities %>%
+  group_by(document1) %>%
+  summarise(count = n())
+
+similarities %>%
+  filter(cosine > .9) %>%
+  select(document1) %>%
+  n_distinct()
+
+similarities %>%
+  filter(cosine > .9) %>%
+  select(document2) %>%
+  n_distinct()
+
+# exact articles (looking at the intercept of the text = 158)
+# using text_simil > .9, there are 211 documents in extended very similar to those in narrow
+# using text_simil >.9 there are 194 documents in narrow very similar to those in extended
+
+# there are about 97 documents in 
+
+simil %>%
+  filter(cosine < 0.1)
+  filter(document1 < 1000) %>%
+  filter(document2 > 1000) %>%
+   %>%
+  select(document1) %>%
+  n_distinct()
+
+simil %>%
+  filter(document1 < 1000) %>%
+  filter(document2 > 1000) %>%
+  filter(cosine < 0.2) %>%
+  group_by(document2) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  filter(count > 900) %>%
+  n_distinct()
+
+mean(simil$cosine)
+summary(simil$cosine)
+# Average cosine distance is 0.172
+
+
+
+# There are 112 documents in the narrow set that have cosine similarities 
+# of less than 0.2 with more than 900 documents (meaning they share very little
+# information with the other documents)
+
+simil %>%
+  filter(document1 < 1000) %>%
+  filter(document2 > 1000) %>%
+  filter(cosine < 0.2) %>%
+  group_by(document1) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  filter(count > 900) %>%
+  n_distinct()
+
+# There are 98 documents in the extended set that have cosine similarities 
+# of less than 0.2 with more than 900 documents (meaning they share very little
+# information with the other documents)
+
+dfm_groups <- dfm_group(all_dfm, groups = type)
+ndoc(dfm_groups)
+tstat_dist <- as.dist(textstat_dist(dfm_groups))
+
+```
+
+```{r}
+#corpus_subset(all_corpus, grepl("wfp", tolower(texts(all_corpus)))) %>%
+#  tokens(remove_punct = TRUE, remove_url = TRUE, remove_symbols = TRUE) %>%
+#  dfm() %>%
+#  dfm_remove(stopwords("english")) 
+
+#simil_wfp <- as.data.frame(textstat_simil(x = all_dfm, y = all_dfm[c(grep('wfp', texts(all_dfm))), ],
+#                                      method = "cosine", margin = "documents"))
+
+
 ```
 
 # Latent Dirichlet Allocation Topic Models
