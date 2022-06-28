@@ -16,6 +16,8 @@ library("quanteda.dictionaries")
 library("seededlda")
 library("lubridate")
 library(tidyverse)
+library(stringi)
+Sys.setenv(LANG = "en")
 ```
 
 #Quanteda
@@ -90,6 +92,7 @@ corpus_subset(extended_corpus, docid == 471)
 
 ```{r}
 narrow_rel$docid <- 1000:(nrow(narrow_rel)+999)
+
 extended_rel$type <- 'extended'
 narrow_rel$type <- 'narrow'
 all <- rbind(extended_rel, narrow_rel)
@@ -141,7 +144,6 @@ simil %>%
   filter(cosine < 0.1)
   filter(document1 < 1000) %>%
   filter(document2 > 1000) %>%
-   %>%
   select(document1) %>%
   n_distinct()
 
@@ -179,10 +181,11 @@ simil %>%
 # of less than 0.2 with more than 900 documents (meaning they share very little
 # information with the other documents)
 
-dfm_groups <- dfm_group(all_dfm, groups = type)
-ndoc(dfm_groups)
-tstat_dist <- as.dist(textstat_dist(dfm_groups))
-
+#dfm_groups <- dfm_group(all_dfm, groups = source)
+#ndoc(dfm_groups)
+#tstat_dist <- as.dist(textstat_dist(dfm_groups))
+#clust <- hclust(tstat_dist)
+#plot(clust, xlab = "Distance", ylab = NULL)
 ```
 
 ```{r}
@@ -360,15 +363,28 @@ dfm_lookup(inaugFiveDfm, posDict, exclusive = FALSE)
 
 library("spacyr")
 #spacy_install()
-spacy_initialize(model = "en_core_web_lg", save_profile = TRUE)
 ```
 
 ```{r}
 # Note - The number of documents it can parse is low since it tokenizes into a df - high dimensional. 
-sample_text <- news$title[1:100]
 parsedtxt <-spacy_parse(sample_text, tag = TRUE, entity = TRUE, lemma = FALSE, nounphrase = TRUE)
 
 entities <- entity_extract(parsedtxt)
+
+sample_text <- stri_encode(sample_text, "", "UTF-8")
+head(sample_text)
+
+wikifier_key <- 'vydltnadaktrbsbirdoubuibinqjyu'
+```
+
+```{r}
+# Send a call to the JSI Wikifier
+# Use UTF-7 and %- encoding
+
+http://www.wikifier.org/annotate-article?text=...&lang=...&...
+
+
+```
 
 entities_two <- nounphrase_extract(parsedtxt)
 

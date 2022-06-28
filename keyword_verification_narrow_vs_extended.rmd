@@ -448,22 +448,22 @@ narrow_drc[!(narrow_drc %in% extended_drc)]
 extended_drc[!(extended_drc %in% narrow_drc)]
 ```
 
-```{r}
+```{r warning=FALSE}
 find_similarities <- function(list_of_dfs, search_type = "general", query_field = 'text', 
                       query = c("congo", "zambia")) {
   
   ### Only takes two dataframes to compare at at time
   
   saved <- NULL
-  saved$query <- query
+  saved$query <- 'query'
   saved$df <- "general"
-  saved$narrow_total <- 0
-  saved$extended_total <- 0 
-  saved$narrow_in_extended <- 0
-  saved$extended_in_narrow <- 0
-  saved$exact <- 0
-  saved$narrow_notin_extended <- 0
-  saved$extended_notin_narrow <- 0
+  saved$Total_Articles_Narrow <- 0
+  saved$Total_Articles_Extended <- 0 
+  saved$Articles_in_Narrow_and_Extended <- 0
+  saved$Articles_in_Extended_and_Narrow <- 0
+  saved$Exact_Matches <- 0
+  saved$Articles_in_Narrow_notin_Extended <- 0
+  saved$Articles_in_Extended_notin_Narrow <- 0
   saved <- as.data.frame(saved)
   indx <- 1
   
@@ -500,29 +500,71 @@ find_similarities <- function(list_of_dfs, search_type = "general", query_field 
   } 
   return(saved)
 }
+queries <- c('humanitarian', 'humanitarian disaster', "ethiopia", "somalia", "drc", "democratic republic of the congo", "zambia", "burundi", "burkina faso", "bangladesh", "congo", "syria", "central african republic", "caf", "afghanistan", "a")
+
 
 similarities_headline <- find_similarities(list_dfs_gensearch, "n_vs_e_2017_headline", 
                              query_field = 'headline', query = queries)
 
+
 similarities_text <- find_similarities(list_dfs_gensearch, "n_vs_e_2017_text", 
                              query_field = 'text', query = queries) 
+
+queries <- c('humanitarian', 'humanitarian disaster', "humanitarian assistance", "drought", "famine", "hunger", "boko haram", "poverty", "insurgency", "un", "refugee", "idps", "internally displaced",  "a")
+
+list_chad_rel <- list(chad_extended_rel, chad_narrow_rel)
+similarities_text_chad_rel <- find_similarities(list_chad_rel, "chad_rel", 
+                             query_field = 'text', query = queries)
+similarities_headline_chad_rel <- find_similarities(list_chad_rel, "chad_rel", 
+                             query_field = 'text', query = queries)
+
+list_chad_all <- list(chad_extended_all, chad_narrow_all)
+similarities_text_chad_all <- find_similarities(list_chad_all, "chad_all", 
+                             query_field = 'text', query = queries)
+similarities_headline_chad_all <- find_similarities(list_chad_all, "chad_all", 
+                             query_field = 'text', query = queries)
+
+list_chad_extended <- list(chad_extended_rel, chad_extended_all)
+similarities_text_chad_extended <- find_similarities(list_chad_extended, "chad_ext", 
+                             query_field = 'text', query = queries)
+similarities_headline_chad_extended <- find_similarities(list_chad_extended, "chad_ext", 
+                             query_field = 'text', query = queries)
+
+list_chad_narrow <- list(chad_narrow_rel, chad_narrow_all)
+similarities_text_chad_narrow <- find_similarities(list_chad_narrow, "chad_narrow", 
+                             query_field = 'text', query = queries)
+similarities_headline_chad_narrow <- find_similarities(list_chad_narrow, "chad_narrow", 
+                             query_field = 'text', query = queries)
+
+tab_1 <- similarities_text %>%
+  select(-df) %>%
+  mutate(Share_Articles_in_Narrow_and_Extended = round(Total_Articles_Narrow / Articles_in_Narrow_and_Extended, 2), 
+         Share_Articles_in_Extended_and_Narrow = round(Total_Articles_Extended / Articles_in_Extended_and_Narrow, 2)) %>%
+
+write.xlsx(similarities_text_chad_all, "similarities_text_chad_all.xlsx", colNames = TRUE, rowNames=TRUE)
+write.xlsx(similarities_text_chad_rel, "similarities_text_chad_rel.xlsx", colNames = TRUE, rowNames=TRUE)
+write.xlsx(similarities_headline_chad_extended, "similarities_text_chad_extended.xlsx", colNames = TRUE, rowNames=TRUE)
+write.xlsx(similarities_text_chad_narrow, "similarities_text_chad_narrow.xlsx", colNames = TRUE, rowNames=TRUE)
 ```
 
 Extended search seems to generate articles that include more mentions of more remote (traditionally uncovered) crisis, such as Burundi and South Sudan. There are some countries with less number of articles, such as the DRC, Bangladesh, CAF and Syria. However, the differences are minimal in most cases. 
 
 
 ```{r}
-queries_two <- c("famine", "earthquake", "cyclone", "hurricane")
-results_two <- find_word(list_dfs_gensearch, list_names_gensearch, query = queries_two)
-results_two %>%
-  group_by(query) %>%
-  mutate(diff=count-lag(count,default=first(count))) %>%
-  filter(diff < 0)
+narrow_and_extended <- as.data.frame(intersect(narrow_rel$text, extended_rel$text))
+write.xlsx(narrow_and_extended, "narrow_and_extended.xlsx")
+narrow_notin_extended <- as.data.frame(setdiff(narrow_rel$text, extended_rel$text))
+write.xlsx(narrow_notin_extended, "narrow_notin_extended.xlsx")
+extended_notin_narrow <- as.data.frame(setdiff(extended_rel$text, narrow_rel$text))
+write.xlsx(extended_notin_narrow, "extended_notin_narrow.xlsx")
 ```
 
 ```{r}
-# Look at difference in articles captures about Bangladesh and about 
-
+a <- c(1, 2, 3, 4, 6)
+b <- c(5, 6, 7, 8, 9)
+intersect(a, b)
+setdiff(a, b)
+setdiff(b, a)
 ````
 
 
